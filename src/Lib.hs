@@ -1,14 +1,17 @@
 module Lib (run) where
 
-import System.Exit (ExitCode(ExitSuccess))
-import Control.Concurrent (myThreadId, forkIO)
+import Control.Concurrent (forkIO, myThreadId)
+import qualified Control.Exception as E
 import Control.Monad (forever)
 import Data.Binary.Get as G (getInt32be, runGet)
-import qualified Control.Exception as E
 import qualified Data.ByteString.Builder as BB
 import qualified Data.ByteString.Lazy as B
 import qualified Data.ByteString.Lazy.Char8 as BC
 import Data.Int (Int32)
+import Data.Map (Map)
+import qualified Data.Map as Map
+import Data.Maybe (fromMaybe)
+import Data.Text (pack, replace, unpack)
 import Network.Socket
   ( Family (AF_INET),
     SockAddr (SockAddrInet),
@@ -23,20 +26,28 @@ import Network.Socket
     socketToHandle,
     tupleToHostAddress,
   )
+import Safe (tailSafe)
+import System.Exit (ExitCode (ExitSuccess))
 import System.IO
   ( BufferMode (NoBuffering),
     Handle,
     IOMode (ReadWriteMode, WriteMode),
     hSetBuffering,
     hWaitForInput,
+    stdin,
+    stdout,
     withFile,
   )
 import System.Posix.Signals
-    ( installHandler, sigINT, sigTERM, Handler(Catch) )
+  ( Handler (Catch),
+    installHandler,
+    sigINT,
+    sigTERM,
+  )
 import System.Process
   ( CreateProcess (env, std_err, std_in, std_out),
-    StdStream (CreatePipe, UseHandle),
     ProcessHandle,
+    StdStream (CreatePipe, UseHandle),
     createProcess_,
     proc,
     terminateProcess,
@@ -102,6 +113,13 @@ readFromDyalog handle = do
   let response = BC.unpack responseBS
   return response
 
+sendUserInput :: Handle -> String -> IO ()
+sendUserInput handle string =
+  sendToDyalog handle wrappedString
+  where
+    wrappedString = "[\"Execute\",{\"text\":\"" ++ escapedString ++ "\",\"trace\":0}]"
+    escapedString = unpack $ replace (pack "\"") (pack "\\\"") (pack string)
+
 listenToConnection :: Socket -> IO ()
 listenToConnection sock = do
   putStrLn "3) Waiting for a TCP connection from Dyalog"
@@ -116,16 +134,49 @@ listenToConnection sock = do
   sendToDyalog handle "[\"GetWindowLayout\",{}]"
   forkIO $ handleUserInput handle
   forever $ do
+    putStrLn "Waiting for a message"
     message <- readFromDyalog handle
     putStrLn $ "Received: " ++ message
 
 handleUserInput :: Handle -> IO ()
 handleUserInput handle = do
-  -- TODO
-  return ()
+  hSetBuffering stdin NoBuffering
+  hSetBuffering stdout NoBuffering
+  go False ""
+  where
+    go :: Bool -> String -> IO ()
+    go backslashMode inputRev = do
+      char <- getChar
+      case char of
+        '\n' -> do
+          sendUserInput handle (reverse inputRev)
+          go False ""
+        '\b' -> backspace inputRev
+        '\DEL' -> backspace inputRev
+        '`' -> go True inputRev
+        _ ->
+          if backslashMode
+            then do
+              let newChar = fromMaybe ' ' $ Map.lookup char aplBackslashChars
+              putStr $ "\b\b" ++ [newChar] ++ " \b"
+              go False (newChar : inputRev)
+            else do
+              go False (char : inputRev)
+    backspace inputRev = do
+      if null inputRev
+        then do
+          putStr "\b \b\b \b"
+          go False inputRev
+        else do
+          putStr "\b \b\b \b\b \b"
+          go False (tailSafe inputRev)
 
-
-
+aplBackslashChars :: Map Char Char
+aplBackslashChars =
+  Map.fromList $
+    zip
+      "`1234567890-=qwertyuiop[]asdfghjkl;'zxcvbnm,./~!@#$%^&*()_+ETIOP{}|JKL:Z<>?\\\""
+      "⋄¨¯<≤=≥>≠∨∧×÷?⍵∊⍴~↑↓⍳○*←→⍺⌈⌊_∇∆∘'⎕⍎⍕⊂⊃∩∪⊥⊤|⍝⍀⌿⌺⌶⍫⍒⍋⌽⍉⊖⍟⍱⍲!⌹⍷⍨⍸⍥⍣⍞⍬⊣⍤⌸⌷≡⊆⍪⍙⍠⊢≢"
 
 installExitHandlers :: ProcessHandle -> IO ()
 installExitHandlers dyalogHandle = do
