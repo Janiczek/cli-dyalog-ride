@@ -53,9 +53,19 @@ import System.Process
     terminateProcess,
   )
 
+shouldLog :: Bool
+shouldLog = True
+
+l :: String -> IO ()
+l string =
+  if shouldLog then
+    putStrLn string
+  else
+    return ()
+
 serveTcpServer :: IO Socket
 serveTcpServer = do
-  putStrLn "1) Starting up the TCP server"
+  l "1) Starting up the TCP server"
   sock <- socket AF_INET Stream 0
   setSocketOption sock ReuseAddr 1
   bind sock (SockAddrInet 8000 (tupleToHostAddress (127, 0, 0, 1)))
@@ -64,7 +74,7 @@ serveTcpServer = do
 
 spawnDyalog :: IO ProcessHandle
 spawnDyalog = do
-  putStrLn "2) Spawning Dyalog"
+  l "2) Spawning Dyalog"
   withFile "/dev/null" WriteMode $ \devNullHandle -> do
     (_, _, _, dyalogHandle) <-
       createProcess_
@@ -99,7 +109,7 @@ sendToDyalog handle string =
           <> BB.stringUtf8 "RIDE"
           <> message
    in do
-        putStrLn $ "Sending: " ++ string
+        l $ "Sending: " ++ string
         BB.hPutBuilder handle everything
 
 readFromDyalog :: Handle -> IO String
@@ -117,14 +127,14 @@ sendUserInput :: Handle -> String -> IO ()
 sendUserInput handle string =
   sendToDyalog handle wrappedString
   where
-    wrappedString = "[\"Execute\",{\"text\":\"" ++ escapedString ++ "\",\"trace\":0}]"
+    wrappedString = "[\"Execute\",{\"text\":\"" ++ escapedString ++ "\\n\",\"trace\":0}]"
     escapedString = unpack $ replace (pack "\"") (pack "\\\"") (pack string)
 
 listenToConnection :: Socket -> IO ()
 listenToConnection sock = do
-  putStrLn "3) Waiting for a TCP connection from Dyalog"
+  l "3) Waiting for a TCP connection from Dyalog"
   (socket, addr) <- accept sock
-  putStrLn $ "4) Accepted a connection:" ++ show (socket, addr)
+  l $ "4) Accepted a connection:" ++ show (socket, addr)
   handle <- socketToHandle socket ReadWriteMode
   hSetBuffering handle NoBuffering
   sendToDyalog handle "SupportedProtocols=2"
@@ -132,11 +142,13 @@ listenToConnection sock = do
   sendToDyalog handle "[\"Identify\",{\"identity\":1}]"
   sendToDyalog handle "[\"Connect\",{\"remoteId\":2}]"
   sendToDyalog handle "[\"GetWindowLayout\",{}]"
+  -- TODO do these all in one thread. read all msgs, then handle input and after \n and sending the Execute thing read all msgs again
+  -- TODO why do we get no answer to Execute?
   forkIO $ handleUserInput handle
   forever $ do
-    putStrLn "Waiting for a message"
+    l "Waiting for a message"
     message <- readFromDyalog handle
-    putStrLn $ "Received: " ++ message
+    l $ "Received: " ++ message
 
 handleUserInput :: Handle -> IO ()
 handleUserInput handle = do
