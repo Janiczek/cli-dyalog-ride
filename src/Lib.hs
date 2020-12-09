@@ -143,7 +143,6 @@ listenToConnection sock = do
   sendToDyalog handle "[\"Connect\",{\"remoteId\":2}]"
   sendToDyalog handle "[\"GetWindowLayout\",{}]"
   -- TODO do these all in one thread. read all msgs, then handle input and after \n and sending the Execute thing read all msgs again
-  -- TODO why do we get no answer to Execute?
   forkIO $ handleUserInput handle
   forever $ do
     l "Waiting for a message"
