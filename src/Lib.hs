@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 
 module Lib (Flags (..), run) where
@@ -5,16 +6,21 @@ module Lib (Flags (..), run) where
 import Control.Concurrent (forkIO, myThreadId)
 import qualified Control.Exception as E
 import Control.Monad (forever, when)
+import qualified Data.Aeson as A
 import Data.Binary.Get as G (getInt32be, runGet)
 import qualified Data.ByteString.Builder as BB
-import qualified Data.ByteString.Lazy as B 
 import Data.ByteString.Lazy (ByteString)
+import qualified Data.ByteString.Lazy as B
 import qualified Data.ByteString.Lazy.Char8 as BC
+import Data.Function ((&))
+import qualified Data.HashMap.Strict as HM
 import Data.Int (Int32)
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Scientific as S (toBoundedInteger)
 import Data.Text (pack, replace, unpack)
+import qualified Data.Vector as V
 import Network.Socket
   ( Family (AF_INET),
     SockAddr (SockAddrInet),
@@ -151,7 +157,61 @@ listenToConnection verbose sock = do
   forkIO $ handleUserInput verbose handle
   forever $ do
     message <- readFromDyalog handle
-    logBS_ verbose "RECV: " message
+    handleMessage verbose message
+
+handleMessage :: Bool -> ByteString -> IO ()
+handleMessage verbose message = do
+  logBS_ verbose "RECV: " message
+  let value = A.decode message :: Maybe A.Value
+  let str = BC.unpack message
+  case value of
+    Nothing ->
+      case str of
+        "SupportedProtocols=2" -> return ()
+        "UsingProtocol=2" -> return ()
+        _ -> log_ verbose $ "Unknown unstructured message: " ++ str
+    Just (A.Array messageParts) ->
+      case V.toList messageParts of
+        [A.String string, A.Object object] -> do
+          let err = log_ verbose $ "Weirdly formatted " ++ unpack string ++ ": " ++ str
+          case string of
+            "Identify" -> return ()
+            "UpdateDisplayName" -> return ()
+            "HadError" -> return ()
+            "EchoInput" -> return ()
+            "SetPromptType" ->
+              case HM.lookup "type" object of
+                Just (A.Number n) ->
+                  case S.toBoundedInteger n :: Maybe Int of
+                    Just 0 -> return ()
+                    Just 1 -> putStr "      "
+                    Just 2 -> putStrLn "TODO handle SetPromptType 2 = Quad input"
+                    Just 3 -> putStrLn "TODO handle SetPromptType 3 = line editor"
+                    Just 4 -> putStrLn "TODO handle SetPromptType 4 = Quote-Quad input"
+                    Just 5 -> putStrLn "TODO handle SetPromptType 5 = ???"
+                    _ -> err
+                _ -> err
+            "ReplyGetLog" ->
+              case HM.lookup "result" object of
+                Just (A.Array lines) ->
+                  V.toList lines
+                    & mapMaybe getString
+                    & mapM_ putStrLn
+                _ -> err
+            "AppendSessionOutput" ->
+              case HM.lookup "result" object of
+                Just (A.String text) -> putStr $ unpack text
+                Just (A.Array lines) ->
+                  V.toList lines
+                    & mapMaybe getString
+                    & mapM_ putStr
+                _ -> err
+            _ -> log_ verbose $ "Unknown message: " ++ str
+        _ -> log_ verbose $ "Unknown weirdly structured message: " ++ str
+  where
+    getString :: A.Value -> Maybe String
+    getString (A.String text) = Just $ unpack text
+    getString _ = Nothing
 
 handleUserInput :: Bool -> Handle -> IO ()
 handleUserInput verbose handle = do
@@ -203,6 +263,7 @@ installExitHandlers dyalogHandle = do
     interruptHandler threadId =
       Catch
         ( do
+            putStrLn ""
             -- TODO instead of terminating dyalog, send ["Exit",{"code":0}] to it
             terminateProcess dyalogHandle
             E.throwTo threadId ExitSuccess

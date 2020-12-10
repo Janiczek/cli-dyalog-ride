@@ -43,6 +43,10 @@ library
     , containers
     , safe
     , text
+    , aeson
+    , vector
+    , unordered-containers
+    , scientific
   default-language: Haskell2010
 
 executable apline-exe
