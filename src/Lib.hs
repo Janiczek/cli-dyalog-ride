@@ -1,11 +1,14 @@
-module Lib (run) where
+{-# LANGUAGE RecordWildCards #-}
+
+module Lib (Flags (..), run) where
 
 import Control.Concurrent (forkIO, myThreadId)
 import qualified Control.Exception as E
-import Control.Monad (forever)
+import Control.Monad (forever, when)
 import Data.Binary.Get as G (getInt32be, runGet)
 import qualified Data.ByteString.Builder as BB
-import qualified Data.ByteString.Lazy as B
+import qualified Data.ByteString.Lazy as B 
+import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy.Char8 as BC
 import Data.Int (Int32)
 import Data.Map (Map)
@@ -53,53 +56,56 @@ import System.Process
     terminateProcess,
   )
 
-shouldLog :: Bool
-shouldLog = True
+data Flags = Flags
+  { port :: Int,
+    dyalogPath :: String,
+    verbose :: Bool
+  }
 
-l :: String -> IO ()
-l string =
-  if shouldLog then
-    putStrLn string
-  else
-    return ()
+log_ :: Bool -> String -> IO ()
+log_ verbose string =
+  when verbose $ putStrLn string
 
-serveTcpServer :: IO Socket
-serveTcpServer = do
-  l "1) Starting up the TCP server"
+logBS_ :: Bool -> String -> ByteString -> IO ()
+logBS_ verbose label string =
+  when verbose $ do
+    putStr label
+    BC.putStrLn string
+
+serveTcpServer :: Int -> IO Socket
+serveTcpServer port = do
   sock <- socket AF_INET Stream 0
   setSocketOption sock ReuseAddr 1
-  bind sock (SockAddrInet 8000 (tupleToHostAddress (127, 0, 0, 1)))
+  let portNumber = read (show port) -- WTF
+  bind sock (SockAddrInet portNumber (tupleToHostAddress (127, 0, 0, 1)))
   listen sock 1
   return sock
 
-spawnDyalog :: IO ProcessHandle
-spawnDyalog = do
-  l "2) Spawning Dyalog"
+spawnDyalog :: Int -> FilePath -> IO ProcessHandle
+spawnDyalog port dyalogPath = do
   withFile "/dev/null" WriteMode $ \devNullHandle -> do
     (_, _, _, dyalogHandle) <-
       createProcess_
         "dyalog process"
         (proc dyalogPath dyalogArgs)
-          { --cwd = Just cwd,
-            env =
+          { env =
               Just
                 [ ("CLASSICMODE", "1"),
                   ("SINGLETRACE", "1"),
-                  ("RIDE_INIT", "CONNECT:127.0.0.1:8000"),
+                  ("RIDE_INIT", "CONNECT:127.0.0.1:" ++ show port),
                   ("RIDE_SPAWNED", "1"),
                   ("APLK0", "default")
                 ],
-            std_in = CreatePipe, --Inherit,
+            std_in = CreatePipe,
             std_out = UseHandle devNullHandle,
             std_err = UseHandle devNullHandle
           }
     return dyalogHandle
   where
-    dyalogPath = "/home/martin/.lib/dyalog/opt/mdyalog/18.0/64/unicode/dyalog"
     dyalogArgs = ["+s", "-q"]
 
-sendToDyalog :: Handle -> String -> IO ()
-sendToDyalog handle string =
+sendToDyalog :: Bool -> Handle -> String -> IO ()
+sendToDyalog verbose handle string =
   let message = BB.stringUtf8 string
       messageBS = BB.toLazyByteString message
       messageLength = B.length messageBS
@@ -109,48 +115,46 @@ sendToDyalog handle string =
           <> BB.stringUtf8 "RIDE"
           <> message
    in do
-        l $ "Sending: " ++ string
+        log_ verbose $ "SEND: " ++ string
         BB.hPutBuilder handle everything
 
-readFromDyalog :: Handle -> IO String
+readFromDyalog :: Handle -> IO ByteString
 readFromDyalog handle = do
   hWaitForInput handle 4
   lengthBS <- B.hGet handle 4
   let length = fromIntegral $ G.runGet G.getInt32be lengthBS
   hWaitForInput handle length
   B.hGet handle 4 -- "RIDE"
-  responseBS <- B.hGet handle (length - 8) -- minus length minus RIDE
-  let response = BC.unpack responseBS
-  return response
+  B.hGet handle (length - 8) -- minus length minus RIDE
 
-sendUserInput :: Handle -> String -> IO ()
-sendUserInput handle string =
-  sendToDyalog handle wrappedString
+sendUserInput :: Bool -> Handle -> String -> IO ()
+sendUserInput verbose handle string =
+  sendToDyalog verbose handle wrappedString
   where
     wrappedString = "[\"Execute\",{\"text\":\"" ++ escapedString ++ "\\n\",\"trace\":0}]"
     escapedString = unpack $ replace (pack "\"") (pack "\\\"") (pack string)
 
-listenToConnection :: Socket -> IO ()
-listenToConnection sock = do
-  l "3) Waiting for a TCP connection from Dyalog"
-  (socket, addr) <- accept sock
-  l $ "4) Accepted a connection:" ++ show (socket, addr)
+listenToConnection :: Bool -> Socket -> IO ()
+listenToConnection verbose sock = do
+  (socket, _) <- accept sock
   handle <- socketToHandle socket ReadWriteMode
   hSetBuffering handle NoBuffering
-  sendToDyalog handle "SupportedProtocols=2"
-  sendToDyalog handle "UsingProtocol=2"
-  sendToDyalog handle "[\"Identify\",{\"identity\":1}]"
-  sendToDyalog handle "[\"Connect\",{\"remoteId\":2}]"
-  sendToDyalog handle "[\"GetWindowLayout\",{}]"
-  -- TODO do these all in one thread. read all msgs, then handle input and after \n and sending the Execute thing read all msgs again
-  forkIO $ handleUserInput handle
+  sendToDyalog verbose handle "SupportedProtocols=2"
+  sendToDyalog verbose handle "UsingProtocol=2"
+  sendToDyalog verbose handle "[\"Identify\",{\"identity\":1}]"
+  sendToDyalog verbose handle "[\"Connect\",{\"remoteId\":2}]"
+  sendToDyalog verbose handle "[\"GetWindowLayout\",{}]"
+  -- TODO do these all in one thread:
+  -- read all msgs
+  -- then handle input
+  -- after \n and sending the Execute thing read all msgs again
+  forkIO $ handleUserInput verbose handle
   forever $ do
-    l "Waiting for a message"
     message <- readFromDyalog handle
-    l $ "Received: " ++ message
+    logBS_ verbose "RECV: " message
 
-handleUserInput :: Handle -> IO ()
-handleUserInput handle = do
+handleUserInput :: Bool -> Handle -> IO ()
+handleUserInput verbose handle = do
   hSetBuffering stdin NoBuffering
   hSetBuffering stdout NoBuffering
   go False ""
@@ -160,7 +164,7 @@ handleUserInput handle = do
       char <- getChar
       case char of
         '\n' -> do
-          sendUserInput handle (reverse inputRev)
+          sendUserInput verbose handle (reverse inputRev)
           go False ""
         '\b' -> backspace inputRev
         '\DEL' -> backspace inputRev
@@ -204,9 +208,9 @@ installExitHandlers dyalogHandle = do
             E.throwTo threadId ExitSuccess
         )
 
-run :: IO ()
-run = do
-  socket <- serveTcpServer
-  dyalogHandle <- spawnDyalog
+run :: Flags -> IO ()
+run Flags {..} = do
+  socket <- serveTcpServer port
+  dyalogHandle <- spawnDyalog port dyalogPath
   installExitHandlers dyalogHandle
-  listenToConnection socket
+  listenToConnection verbose socket
