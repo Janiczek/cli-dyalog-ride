@@ -184,7 +184,7 @@ handleMessage verbose message = do
                 Just (A.Number n) ->
                   case S.toBoundedInteger n :: Maybe Int of
                     Just 0 -> return ()
-                    Just 1 -> putStr "      "
+                    Just 1 -> putStr "\n      "
                     Just 2 -> putStrLn "TODO handle SetPromptType 2 = Quad input"
                     Just 3 -> putStrLn "TODO handle SetPromptType 3 = line editor"
                     Just 4 -> putStrLn "TODO handle SetPromptType 4 = Quote-Quad input"
@@ -201,7 +201,7 @@ handleMessage verbose message = do
             "AppendSessionOutput" ->
               case HM.lookup "result" object of
                 Just (A.String text) -> putStr $ unpack text
-                Just (A.Array lines) ->
+                Just (A.Array lines) -> 
                   V.toList lines
                     & mapMaybe getString
                     & mapM_ putStr
